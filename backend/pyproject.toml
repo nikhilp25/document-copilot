@@ -25,12 +25,20 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "integration: needs live Supabase or OpenAI credentials; excluded from the fast suite",
+]
+
 [tool.uv]
 add-bounds = "exact"
 exclude-newer = "7 days"
 
 [dependency-groups]
 dev = [
+    "docling==2.118.1",
     "ipykernel==7.3.0",
     "pytest==9.1.1",
     "ruff==0.16.1",

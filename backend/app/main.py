@@ -2,14 +2,28 @@
 """FastAPI application entrypoint."""
 
 import sys
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.chat import router as chat_router
 from app.config import settings
+from app.database.supabase import close_http_client
+
 
 # %%
-app = FastAPI(title="Document Copilot API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    yield
+    # Supabase clients borrow a shared connection pool that is opened lazily on
+    # the first request; hand its sockets back on the way out.
+    await close_http_client()
+
+
+# %%
+app = FastAPI(title="Document Copilot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +31,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(chat_router)
 
 
 # %%
