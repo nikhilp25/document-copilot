@@ -11,7 +11,13 @@ from typing import Any
 
 from app.database.supabase import service_client
 
-_DOCUMENT_COLUMNS = "id, accession_number, ticker, form_type, fiscal_year, filing_date"
+# Metadata only — every column except `markdown`, which is megabytes per row.
+# Chunking copies these onto each chunk so retrieval can filter and cite
+# without joining back to this table.
+_DOCUMENT_COLUMNS = (
+    "id, accession_number, ticker, company_name, cik, form_type, "
+    "filing_date, report_date, fiscal_year, source_url"
+)
 
 
 async def upsert_source_document(document: dict[str, Any]) -> uuid.UUID:
@@ -36,8 +42,7 @@ async def upsert_source_document(document: dict[str, Any]) -> uuid.UUID:
 async def list_source_documents() -> list[dict[str, Any]]:
     """Every filing in the corpus, most recently filed first.
 
-    Metadata only — `markdown` is megabytes per row and no caller wants the
-    whole corpus in memory.
+    Metadata only; no caller wants the whole corpus text in memory.
     """
     client = await service_client()
     response = (

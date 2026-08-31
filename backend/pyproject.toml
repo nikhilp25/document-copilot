@@ -42,4 +42,7 @@ dev = [
     "ipykernel==7.3.0",
     "pytest==9.1.1",
     "ruff==0.16.1",
+    # Chunking counts tokens with the embedding model's own tokenizer, so chunk
+    # sizes match what the OpenAI API will charge and truncate on.
+    "tiktoken==0.13.0",
 ]
