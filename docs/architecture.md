@@ -196,6 +196,10 @@ The agent's instructions should encode the product contract:
 
 Retrieval and grounding remain independent from PydanticAI. This keeps ingestion, retrieval tests, and citation validation testable without invoking the LLM.
 
+As built, `GroundedAnswer` carries `answer`, `has_evidence`, and `citations`, where each `Citation` is a `chunk_id` plus a verbatim `quote`. It deliberately does not ask the model to echo back the passages it was given: the orchestrator resolves each `chunk_id` against the ledger the agent's tools accumulated during the run, which is both cheaper and harder to fake. `has_evidence` exists so that "the corpus does not answer this" is a mechanically checkable state — true demands at least one citation, false demands none — rather than a judgement about whether some prose sounds like a refusal.
+
+Grounding is a function, not a class: `grounding.validator.violations(answer, retrieved)` returns the list of ways an answer breaks the contract. It runs twice — as an `@agent.output_validator` that raises `ModelRetry` so the model can correct itself, and again in the orchestrator as the gate that fails the turn closed.
+
 ## Retrieval Strategy
 
 Document Copilot uses hybrid retrieval:
@@ -207,6 +211,10 @@ Document Copilot uses hybrid retrieval:
 5. Fetch the selected chunks, source document metadata, and optional neighboring chunks for grounding.
 
 This keeps the database responsible for efficient ranked retrieval and keeps the application responsible for product-specific ranking policy. The first implementation should avoid agent-generated SQL; the PydanticAI agent receives bounded tools such as `search_filings`, `read_chunk`, and `read_surrounding_chunks`.
+
+Steps 2 and 3 run as Postgres functions (`match_chunks_semantic`, `match_chunks_lexical`) called over `rpc()`, not as application SQL. PostgREST — which every other query in the backend goes through — can neither order by vector distance nor rank a full-text match, and wrapping the two ranked queries as functions keeps retrieval on the client and connection pool the app already has rather than opening a second, direct Postgres connection.
+
+One non-obvious detail in the lexical arm: its terms are combined with `OR`, not the `AND` that every tsquery builder Postgres ships produces. A whole analyst question ANDed together matches no single chunk, which leaves hybrid search running on the semantic arm alone. ORing the lexemes and ranking with `ts_rank_cd` is also what makes Postgres full-text search a fair stand-in for BM25, which scores a bag of words rather than requiring all of them.
 
 ## Supabase and FastAPI Communication
 
@@ -267,6 +275,8 @@ Streaming responsibilities:
 - Send citation/source metadata as structured parts once available.
 - Send clear error events for authentication failures, missing threads, retrieval failures, and grounding failures.
 - Persist only after the assistant run completes successfully, unless a separate partial-message model is deliberately introduced later.
+
+One refinement the implementation makes to the first point: text deltas are sent once the answer has passed citation validation, not as the model produces them. Streaming raw output would mean an analyst could read a claim that validation then retracts, which is the failure the client brief calls fatal. The wait is covered by transient `data-status` parts naming each filing as it is searched — the AI SDK delivers transient parts to `onData` without adding them to `message.parts`, so progress is visible live and absent from the stored transcript.
 
 ## Data Model
 
