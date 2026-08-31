@@ -7,7 +7,6 @@ body for `/chat/stream`, which is why it isn't purely a FastAPI dependency.
 """
 
 import uuid
-from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -18,7 +17,8 @@ from pydantic.alias_generators import to_camel
 
 from app.auth.dependencies import CurrentUser, CurrentUserDep
 from app.chat import messages as ui
-from app.chat.streaming import STREAM_HEADERS, stub_answer, text_stream
+from app.chat import orchestrator
+from app.chat.streaming import STREAM_HEADERS
 from app.database import chats
 from app.database.models.chat_messages import MessageRole
 from app.database.users import ensure_user_record
@@ -144,26 +144,18 @@ async def stream_turn(user: CurrentUserDep, body: StreamRequest) -> StreamingRes
     if thread.title is None:
         await chats.set_thread_title(user, thread.id, ui.derive_title(question_text))
 
-    answer = stub_answer(question_text)
-    message_id = uuid.uuid4()
-
-    async def stream() -> AsyncIterator[str]:
-        async for frame in text_stream(answer, message_id=str(message_id)):
-            yield frame
-
-        # Only a completed run is persisted. A stream the client abandoned
-        # would otherwise leave a half-written answer that reads as a whole one.
-        await chats.append_message(
-            user,
-            thread.id,
-            role=MessageRole.ASSISTANT,
-            content=answer,
-            parts=ui.assistant_parts(answer),
-            message_id=message_id,
-        )
+    # Everything after this point — running the agent, gating it on grounding,
+    # streaming it, storing it — belongs to the orchestrator. The route's job
+    # was authorization and getting the question out of the wire format.
+    stream = orchestrator.run_turn(
+        user,
+        thread,
+        question=question_text,
+        history=body.messages[:-1],
+    )
 
     return StreamingResponse(
-        stream(), media_type="text/event-stream", headers=STREAM_HEADERS
+        stream, media_type="text/event-stream", headers=STREAM_HEADERS
     )
 
 

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # --- OpenAI ---
 
     openai_api_key: str
+
+    # The answering model. Not a `KnownModelName` literal in the pinned
+    # pydantic-ai, but its reasoning profile is — the name reaches OpenAI as
+    # written, so a typo surfaces as a 404 on the first turn.
+    openai_chat_model: str = "gpt-5.5"
+
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
 

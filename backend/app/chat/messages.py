@@ -7,9 +7,17 @@ logs read, and `chat_messages.parts` is the wire form stored verbatim so a
 reloaded thread renders exactly like the live stream did.
 """
 
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
 
 # Long enough to tell two research threads apart in the sidebar, short enough
 # not to wrap.
@@ -37,9 +45,41 @@ def text_of(message: UIMessage) -> str:
     ).strip()
 
 
-def assistant_parts(text: str) -> list[dict[str, Any]]:
-    """The stored part list for an assistant reply built server-side."""
-    return [{"type": "text", "text": text}]
+def assistant_parts(
+    text: str, citations: Sequence[dict[str, Any]] = ()
+) -> list[dict[str, Any]]:
+    """The stored part list for an assistant reply built server-side.
+
+    Citation parts go in verbatim, in the same order and the same shape the
+    stream sent them, so a reloaded thread renders exactly what the analyst
+    saw live. `text_of` filters to text parts, so they change nothing for
+    anything that reads the message as prose.
+    """
+    return [{"type": "text", "text": text}, *citations]
+
+
+def to_model_messages(messages: Sequence[UIMessage]) -> list[ModelMessage]:
+    """Prior turns, in the form PydanticAI takes as `message_history`.
+
+    Only the text survives. Citation and status parts were rendered for a
+    human; replaying them would spend tokens teaching the model to imitate its
+    own past citations instead of retrieving fresh ones. System messages are
+    dropped too — the agent's instructions are re-applied on every run and are
+    not the client's to override.
+    """
+    history: list[ModelMessage] = []
+
+    for message in messages:
+        text = text_of(message)
+        if not text:
+            continue
+
+        if message.role == "user":
+            history.append(ModelRequest([UserPromptPart(content=text)]))
+        elif message.role == "assistant":
+            history.append(ModelResponse([TextPart(content=text)]))
+
+    return history
 
 
 def derive_title(question: str) -> str:
