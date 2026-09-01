@@ -110,7 +110,8 @@ The chat module should be organized around these responsibilities:
 - `src/lib/env.ts` validates `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, and `VITE_SUPABASE_ANON_KEY`.
 - `src/lib/supabase.ts` creates the browser Supabase client.
 - `src/lib/http.ts` wraps `fetch`, applies the backend base URL, injects the Supabase bearer token, handles timeouts, and converts failures into typed API errors.
-- `src/lib/api.ts` exposes product-level calls such as loading threads, creating threads, and fetching message history.
+- `src/lib/api.ts` exposes product-level calls such as loading threads, creating threads, fetching message history, and reading the passage behind a citation.
+- `src/lib/citations.ts` types the two data parts the backend streams (`data-citation`, `data-status`) so `ChatMessage` — not a cast — is what the chat components read.
 - `src/pages/chat/*` renders chat routes and delegates chat streaming to a focused chat component.
 - `src/components/chat/*` renders messages, citations, source passages, empty states, and streaming status.
 
@@ -277,6 +278,19 @@ Streaming responsibilities:
 - Persist only after the assistant run completes successfully, unless a separate partial-message model is deliberately introduced later.
 
 One refinement the implementation makes to the first point: text deltas are sent once the answer has passed citation validation, not as the model produces them. Streaming raw output would mean an analyst could read a claim that validation then retracts, which is the failure the client brief calls fatal. The wait is covered by transient `data-status` parts naming each filing as it is searched — the AI SDK delivers transient parts to `onData` without adding them to `message.parts`, so progress is visible live and absent from the stored transcript.
+
+### Source passage lookup
+
+A citation part carries the filing metadata and the verbatim quote, which is all a chip needs and all the excerpt panel needs to render immediately. What it cannot carry is the text around the quote, so verification has a second endpoint:
+
+```text
+GET /passages/{chunk_id}
+Authorization: Bearer <supabase_access_token>
+```
+
+It returns the cited chunk in full plus its neighbours in the filing, joined as `contextBefore` and `contextAfter`. The corpus is shared rather than user-scoped, so the route authenticates the caller and asks nothing further; a chunk id resolves to filing text and to nothing else. A chunk that re-ingestion has replaced is a `404` — the quote stored with the message is still exactly what the filing said, only the chunk it was read from has a new id, so the panel keeps showing the excerpt and reports just the missing context.
+
+Two consequences for the frontend worth stating, because both are places a naive renderer breaks the trust contract. Markers are matched with the same pattern the validator uses, grouped `[1, 2]` form included, or a real citation silently renders as literal text. And the quote is located inside the chunk whitespace-insensitively, matching `grounding/validator.py`: chunk text carries reconstructed headings and serialized tables, so a quote agrees with its source on the words but rarely on the line breaks.
 
 ## Data Model
 

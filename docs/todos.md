@@ -2,22 +2,24 @@
 
 Work top to bottom. Each phase unlocks the next. Check items off as you go.
 
-> **Status (2026-08-19): Phases 0–6 complete. Phase 7 (trust UI) is next.**
+> **Status (2026-09-01): Phases 0–7 built. Phase 8 (pilot readiness) is next.**
 >
-> The product now does the thing it exists to do. Ask a question, watch the
-> filings being searched, get an answer where every claim carries a `[n]` marker
-> backed by a verbatim quote from a passage retrieved on that turn — and get a
+> The product now does the thing it exists to do, and an analyst can check it.
+> Ask a question, watch the filings being searched by name, get an answer where
+> every claim carries a clickable `[n]` backed by a verbatim quote — and get a
 > refusal, not a guess, when the corpus does not cover the question.
 >
 > The corpus is ingested (25 filings, 9,617 embedded chunks), `app/retrieval/`
-> ranks it, and `app/assistant/` + `app/grounding/` turn that into cited
-> answers. `stub_answer()` is gone. 137 backend tests pass offline
-> (`uv run pytest -m "not integration"`), plus 15 against the live model and
-> corpus (`uv run pytest -m integration`).
+> ranks it, `app/assistant/` + `app/grounding/` turn that into cited answers,
+> and the frontend renders those citations as markers, chips, and a source
+> panel that shows the quote inside the filing text around it. 142 backend
+> tests pass offline (`uv run pytest -m "not integration"`), plus 16 against
+> the live model and corpus (`uv run pytest -m integration`).
 >
-> What is missing is the last mile of trust: citations stream and persist, but
-> `message-bubble.tsx` still renders text parts only, so an analyst cannot yet
-> click a claim and see the passage. That is Phase 7, and it is now unblocked.
+> What is left is Phase 8: the ten brief questions have not been smoke-tested
+> end to end, the README still has no "Running locally", and nothing imports
+> `structlog` yet. The one Phase 7 item nobody has done by hand is the
+> click-through verify — see the note under that phase.
 
 ## Where to start: backend, frontend, or both?
 
@@ -39,7 +41,9 @@ The critical path is **data model → ingestion → retrieval → LLM → citati
 - [x] Install toolchain: Python 3.12+, `uv`, Node 20+, `pnpm` (see [README](../README.md))
 - [x] Create Supabase project and collect credentials ([supabase-setup](guides/supabase-setup.md))
 - [x] Create OpenAI API key (needed from Phase 6 onward)
-- [x] Set `USER_AGENT` in `data/download.py` and download sample 10-K corpus:
+- [x] Set `USER_AGENT` in `data/download.py` and download sample 10-K corpus
+      (still the placeholder `your.email@example.com` — SEC asks for a real contact,
+      so replace it before any re-download or production run):
   ```bash
   uv run data/download.py
   ```
@@ -284,12 +288,60 @@ Goal: analysts can verify every claim in one click — this is what makes the pr
 The shell landed with Phase 3. What's left is everything that needs real citation
 data, so this phase unblocks only after Phase 6.
 
-- [ ] Citation chips/links on assistant messages (company, filing type, date, section) — `message-bubble.tsx` currently filters to text parts, so `data-citation` parts arrive and are dropped
-- [ ] Source passage panel — show underlying excerpt for selected citation
+- [x] Citation chips/links on assistant messages (company, filing type, date, section)
+      — every `[n]` in the prose becomes a marker button, and the citations repeat as
+      labelled chips under the answer. Both open the same passage; `lib/citations.ts`
+      types the parts so a backend field rename is a compile error, not an empty chip
+- [x] Source passage panel — `source-panel.tsx`. Two layers, in this order: the
+      quote comes from the citation itself and is on screen instantly, then the
+      surrounding filing text is fetched and the quote highlighted inside it
 - [x] Empty states (no threads, no corpus match)
 - [x] Error states (auth expired, retrieval failure, grounding failure, network/CORS) — `lib/errors.ts` maps 401/403/404/502 and network failures
-- [x] Loading/streaming status during assistant run
-- [ ] Verify: click a citation → see the exact passage from the filing
+- [x] Loading/streaming status during assistant run — `chat-panel.tsx` registers
+      `onData` and the indicator renders the latest transient `data-status` label, so
+      the ~68s wait reads as "Searching NVDA 2025…" rather than three bouncing dots
+- [x] Verify: click a citation → see the exact passage from the filing — **not yet
+      done by hand.** `pnpm build`, `tsc -b` and `eslint` pass, and the passage route
+      is covered offline and against the live corpus, but nobody has clicked a marker
+      in a browser. Do this first in Phase 8's smoke test
+
+### What Phase 7 added to the backend
+
+The citation part already carried everything a chip needs, so the frontend needed
+no new data to *label* a source. It needed data to *verify* one: chunk text around
+the quote. `GET /passages/{chunk_id}` returns the cited chunk plus its neighbours
+(`contextBefore` / `contextAfter`) over Phase 5's `read_surrounding_chunks`.
+
+- The corpus is shared, not user-scoped, so the route authenticates and asks
+  nothing further — a chunk id reaches filing text and nothing else.
+- A re-ingested-away chunk is a 404. The quote was snapshotted with the message
+  and is still exactly what the filing said, so the panel keeps showing the
+  excerpt and reports only the missing context.
+- `WireModel` moved to `app/api/wire.py`; `chat.py` and `passages.py` share it.
+
+### Two ways this UI could have quietly lied
+
+Both were live traps, and both are now matched to the backend rather than guessed:
+
+- **Grouped markers.** `grounding/validator.py` accepts `[1, 2]` because models
+  reach for it unprompted. A renderer matching only `\[(\d+)\]` leaves those as
+  literal text — a real citation rendered as punctuation. `message-bubble.tsx`
+  mirrors the validator's pattern and makes one button per index.
+- **Whitespace.** The validator compares quote to chunk with whitespace
+  collapsed, because chunks carry reconstructed headings and serialized tables.
+  An exact `indexOf` in the panel would therefore fail to highlight quotes that
+  are genuinely present, so the highlight joins the quote's words with `\s+`.
+
+### Notes carried into Phase 8
+
+- The panel is a fixed 26rem column beside the transcript. With the 18rem thread
+  sidebar that wants ~1100px of viewport; there is no small-screen treatment yet.
+- Neighbour context is one chunk either side (`NEIGHBOR_RADIUS`). For a passage
+  that opens mid-argument that is sometimes not enough, and the panel has no
+  "widen" control — the agent has one, the analyst doesn't.
+- `citation.page` is rendered nowhere, since it is NULL corpus-wide. The field is
+  carried through the route and the type so a paginated source would need no
+  change beyond showing it.
 
 ---
 
@@ -297,8 +349,10 @@ data, so this phase unblocks only after Phase 6.
 
 Goal: 5 senior analysts can use it for a week and report ≥3 hours saved per analyst per week.
 
-- [x] README "Running locally" section — copy-paste commands for backend + frontend + env vars
-- [ ] Seed or document how to ingest/update the corpus — `data/README.md` covers downloading only; ingestion doesn't exist yet
+- [ ] README "Running locally" section — copy-paste commands for backend + frontend + env vars. `README.md` still says "To be added during the build"; the commands exist only in the setup guides
+- [x] Seed or document how to ingest/update the corpus — `data/README.md` documents the
+      full chain (`ingest.documents` → `ingest.chunks` → `ingest.embed`), including the
+      one-filing-per-process loop that keeps Docling inside memory
 - [ ] Smoke-test all 10 example questions from the client brief
 - [ ] Confirm chat history persists across sessions
 - [ ] Confirm ~40-user scale assumptions (no hardcoded single-user shortcuts)
