@@ -2,17 +2,22 @@
 
 Work top to bottom. Each phase unlocks the next. Check items off as you go.
 
-> **Status (2026-08-17): Phases 0–3 complete. Phase 4 is next.**
+> **Status (2026-08-19): Phases 0–6 complete. Phase 7 (trust UI) is next.**
 >
-> The app runs end to end — sign in, create a thread, send a question, watch a
-> reply stream in, reload and see history — but the reply is `stub_answer()` in
-> [`app/chat/streaming.py`](../backend/app/chat/streaming.py), not a grounded
-> answer. Nothing has been ingested, retrieved, or cited yet. 41 backend tests
-> pass (`uv run pytest`).
+> The product now does the thing it exists to do. Ask a question, watch the
+> filings being searched, get an answer where every claim carries a `[n]` marker
+> backed by a verbatim quote from a passage retrieved on that turn — and get a
+> refusal, not a guess, when the corpus does not cover the question.
 >
-> The critical path from here is unchanged: **ingestion → retrieval → LLM →
-> citations**. Phase 7's frontend shell (empty, error, and loading states) is
-> already built and waiting on citation data from Phase 6.
+> The corpus is ingested (25 filings, 9,617 embedded chunks), `app/retrieval/`
+> ranks it, and `app/assistant/` + `app/grounding/` turn that into cited
+> answers. `stub_answer()` is gone. 137 backend tests pass offline
+> (`uv run pytest -m "not integration"`), plus 15 against the live model and
+> corpus (`uv run pytest -m integration`).
+>
+> What is missing is the last mile of trust: citations stream and persist, but
+> `message-bubble.tsx` still renders text parts only, so an analyst cannot yet
+> click a claim and see the passage. That is Phase 7, and it is now unblocked.
 
 ## Where to start: backend, frontend, or both?
 
@@ -119,16 +124,41 @@ Goal: SEC filings in the corpus are parsed, chunked, embedded, and stored in Sup
       `data/markdown/`, mirroring the `downloads/` tree. Page numbers are *not*
       preserved: Docling's HTML backend emits no page breaks, so `document_chunks.page`
       stays NULL and citations will have to cite sections instead.
-- [ ] Chunking strategy (size + overlap; store chunk index, page, section, ticker, filing type, year)
+- [x] Chunking strategy — Docling `HybridChunker` at 512 tokens, counted with the
+      embedding model's own `cl100k_base` tokenizer (`ingest/chunks.py`). No fixed
+      overlap: chunks split on document structure and `merge_peers` packs
+      undersized peers sharing a heading.
+      Chunk index, section, ticker, filing type and year are all stored. `page`
+      is the one column left NULL — see "Known gaps" below; it is a property of
+      the source HTML, not work left to do.
 - [x] Write `source_documents` rows with filing metadata from `manifest.json` — all 25 filings loaded
-- [ ] Write `document_chunks` rows with text + metadata
-- [ ] OpenAI embedding generation → store `vector(1536)` per chunk
-- [ ] Generated `tsvector` populated for full-text search
-- [ ] Idempotent re-run (skip already-ingested documents) — done for `source_documents`
-      (upsert on `accession_number`); still needed for chunks
-- [ ] Unit tests: chunking logic, ~~metadata extraction~~ (`tests/ingest/test_documents.py`)
-- [ ] Run ingestion on full sample corpus (25 filings × 5 companies)
-- [ ] Verify: chunks exist in Supabase; spot-check a known passage (e.g. Apple revenue mix table)
+- [x] Write `document_chunks` rows with text + metadata — 9,617 chunks, filing
+      metadata copied onto each so retrieval needn't join `source_documents`
+- [x] OpenAI embedding generation → store `vector(1536)` per chunk — 100% embedded
+      (`ingest/embed.py`), ~4.3M tokens, ~$0.09 on `text-embedding-3-small`
+- [x] Generated `tsvector` populated for full-text search — 0 chunks missing it
+- [x] Idempotent re-run — `source_documents` upserts on `accession_number`;
+      chunking skips filings that already have chunks; embedding selects on
+      `embedding IS NULL`, so an interrupted run resumes without paying twice
+- [x] Unit tests: chunking logic, metadata extraction, Markdown normalization
+      (`tests/ingest/`, 27 tests, offline)
+- [x] Run ingestion on full sample corpus (25 filings × 5 companies)
+- [x] Verify: 9,617/9,617 embedded at 1536 dims, 25/25 documents, no gaps in
+      `chunk_index`, 97.3% with a section. Semantic spot-checks return the right
+      filer *and* the right item — "NVIDIA export controls to China" →
+      NVDA FY2025 Item 1A at 0.776 cosine.
+
+### Known gaps carried into Phase 5
+
+- `page` is NULL corpus-wide. SEC HTML has no page breaks, so citations must
+  cite Item sections, not page numbers.
+- Section headings are reconstructed, not parsed: filers style headings with CSS
+  instead of `<h1>`–`<h6>`, so `ingest/chunks.py` promotes `Item N.` lines back
+  to Markdown headings. Microsoft's letter-spaced titles survive mangled
+  ("Item 1. B USINESS") — the item number is right, the title text is cosmetic.
+- Some chunks still carry table serialization noise (`label, = .`) where a
+  column holds a value in at least one row. Wholly-empty columns are stripped;
+  partial ones can't be without losing data.
 
 ---
 
@@ -136,13 +166,45 @@ Goal: SEC filings in the corpus are parsed, chunked, embedded, and stored in Sup
 
 Goal: a user question returns ranked, relevant source passages.
 
-- [ ] `retrieval/queries.py` — pgvector semantic search over `document_chunks`
-- [ ] `retrieval/queries.py` — Postgres full-text search over `search_vector`
-- [ ] `retrieval/fusion.py` — Reciprocal Rank Fusion in Python
-- [ ] `retrieval/retriever.py` — query → fused ranked passages + neighbor chunks
-- [ ] Unit tests: fusion ranking, query assembly (mock DB)
-- [ ] Integration test (optional, `@pytest.mark.integration`): real query against ingested corpus — the `integration` marker is already registered in `pyproject.toml`
-- [ ] Verify: test queries from [client-brief](client-brief.md) return relevant chunks (manual or scripted)
+- [x] `retrieval/queries.py` — pgvector semantic search over `document_chunks`,
+      through the `match_chunks_semantic` Postgres function. PostgREST cannot
+      express `order by embedding <=> $1`, so both ranked arms are SQL functions
+      added by migration `eb1fd84894ef` and called over `rpc()` — no second
+      database connection, everything stays on the existing Supabase client.
+- [x] `retrieval/queries.py` — Postgres full-text search over `search_vector`,
+      through `match_chunks_lexical`. Terms are ORed by `analyst_tsquery`, not
+      ANDed: every tsquery builder Postgres ships requires *every* term, so a
+      whole analyst question matched nothing and this arm was silently dead.
+      ORing them is also what makes it a stand-in for BM25, which scores a bag
+      of words; `ts_rank_cd` then ranks by coverage.
+- [x] `retrieval/fusion.py` — Reciprocal Rank Fusion in Python, `k=60`
+- [x] `retrieval/retriever.py` — query → fused ranked passages + neighbor chunks.
+      `DocumentRetriever.search` / `read_chunk` / `read_surrounding_chunks` are
+      deliberately the three tools Phase 6 hands the agent. 50 candidates per
+      arm, top 10 out. Filters (`ticker`, `fiscal_year`, `form_type`) take one
+      value each because they apply as JSONB containment, which has no `in` —
+      cross-company questions become one search per company.
+- [x] Unit tests: fusion ranking, query assembly (mock DB) — `tests/retrieval/`,
+      28 tests, offline
+- [x] Integration test (optional, `@pytest.mark.integration`): real query against
+      ingested corpus — 10 tests, first use of the marker
+- [x] Verify: test queries from [client-brief](client-brief.md) return relevant
+      chunks. Q3 → NVDA Item 7 MD&A and Item 1A on data center demand; Q4 with
+      `ticker="MSFT"` → the Azure/cloud sections across FY2022–25; Q7 with
+      `ticker="AAPL"` → "Substantially all of the Company's manufacturing" in
+      Item 1A across four years. A full search is ~1.5s including the query
+      embedding, with both arms running concurrently.
+
+### Notes for Phase 6
+
+- No reranker. The reference pipeline this follows ends with a cross-encoder,
+  which is the single biggest accuracy win — but it is a new dependency and a
+  third API key, and there is no eval set yet to show it earns its latency.
+  `retriever.py` marks where it slots in.
+- `SourcePassage` lives in `retrieval/retriever.py`, not `assistant/outputs.py`,
+  so the dependency runs agent → retrieval and never back. `GroundedAnswer`
+  should import it.
+- `app/config.py` still has no chat-model setting; Phase 6 needs one.
 
 ---
 
@@ -150,21 +212,68 @@ Goal: a user question returns ranked, relevant source passages.
 
 Goal: grounded answers with enforced citations — the core product contract.
 
-`pydantic-ai` and `openai` are already installed; none of the modules below exist yet.
+- [x] `assistant/instructions.md` — product contract, kept as Markdown so it can
+      be edited and diffed as prose rather than buried in a Python string
+- [x] PydanticAI agent with typed deps (`DocumentAgentDeps`) and output
+      (`GroundedAnswer`), on `gpt-5.5` via the new `OPENAI_CHAT_MODEL` setting
+- [x] Agent tools: `search_filings`, `read_chunk`, `read_surrounding_chunks` —
+      one line each over Phase 5's `DocumentRetriever`. Every tool routes its
+      results through `deps.remember`, building the ledger of what the model
+      was actually shown; that ledger is what makes grounding a membership test
+      instead of a judgement call.
+- [x] `chat/orchestrator.py` — one turn: agent → validate → stream → persist
+- [x] `grounding/validator.py` — a pure function, no pydantic-ai and no I/O.
+      Wired as an `@agent.output_validator` that raises `ModelRetry`, so a
+      fixable citation costs one more request rather than the whole turn, and
+      re-run afterwards as the fail-closed gate.
+- [x] `chat/streaming.py` — `data-citation` parts after the text, transient
+      `data-status` parts during the run, `error` parts on failure;
+      `stub_answer()` deleted
+- [x] Replaced the `stub_answer()` call in `app/api/chat.py::stream_turn` with
+      the orchestrator
+- [x] Persist `message_citations` linked to assistant messages
+      (`app/database/citations.py`), quote snapshotted as the excerpt
+- [x] Unit tests: citation validation, grounding enforcement, message conversion
+      — 41 new offline tests. The agent ones run the *real* agent against a
+      `FunctionModel`, so the grounding contract is tested, not mocked away.
+- [x] Verify against [client-brief example questions](client-brief.md#example-analyst-questions):
+  - [x] Answers cite specific filings and **sections** — `page` is NULL
+        corpus-wide, so a citation is located by its Item
+  - [x] Questions the corpus cannot answer come back `has_evidence=false` with
+        no citations (verified against a company outside the corpus)
+  - [x] Question 10 (generative AI margins) declines the causal claim and cites
+        only what the filings literally say
 
-- [ ] `assistant/instructions.md` — product contract (cite everything, refuse to invent, no stock picks)
-- [ ] PydanticAI agent with typed deps (`DocumentAgentDeps`) and output (`GroundedAnswer`)
-- [ ] Agent tools: `search_filings`, `read_chunk`, `read_surrounding_chunks`
-- [ ] `chat/orchestrator.py` — one turn: retrieve → agent → validate → stream → persist
-- [ ] `grounding/validator.py` — every citation maps to a retrieved passage; fail closed on violation
-- [ ] `chat/streaming.py` — add `data-citation` parts alongside the text deltas, and drop `stub_answer()`
-- [ ] Replace the `stub_answer()` call in `app/api/chat.py::stream_turn` with the orchestrator
-- [ ] Persist `message_citations` linked to assistant messages
-- [ ] Unit tests: citation validation, grounding enforcement, message conversion
-- [ ] Verify against [client-brief example questions](client-brief.md#example-analyst-questions):
-  - [ ] Answers cite specific filings and pages
-  - [ ] Under-specified questions get "not enough evidence" responses
-  - [ ] Question 10 (generative AI margins) refuses to infer beyond filings
+### How a turn streams, and why
+
+The analyst sees progress immediately and prose only after it has been checked:
+
+```
+ 4.4s  data-status   Searching NVDA…            (transient — never persisted)
+ …     data-status   Searching NVDA 2024…
+68.4s  text-start / text-delta …                (validated answer)
+68.4s  data-citation ×10                        (persisted with the message)
+68.4s  finish / [DONE]
+```
+
+Streaming raw model tokens would be faster to first word, but the analyst could
+read a claim that validation then retracts — the failure the brief calls fatal.
+So the text is gated and the wait is covered by progress parts instead.
+
+### Notes carried into Phase 7
+
+- The full turn above took **68s** on a real cross-section question with ten
+  searches. Progress starts at ~4s so nobody stares at a blank panel, but this
+  is the number to watch in Phase 8's latency review. The knobs are the model's
+  reasoning effort and `CANDIDATE_LIMIT`.
+- Citation excerpts inherit the Phase 4 table-serialisation noise: one citation
+  above quotes `Direct Customer A, = Direct Customer A.` verbatim, because that
+  is genuinely what the chunk says. The model is behaving correctly; the chunk
+  is not. Worth a passage-panel design that shows surrounding context.
+- The frontend needs no change to *receive* citations — they already stream and
+  round-trip through `chat_messages.parts`. Phase 7 is purely rendering.
+- `errorText` reaches the analyst verbatim (`describeError` has no mapping for
+  stream errors), so the failure strings in `orchestrator.py` are product copy.
 
 ---
 
@@ -175,7 +284,7 @@ Goal: analysts can verify every claim in one click — this is what makes the pr
 The shell landed with Phase 3. What's left is everything that needs real citation
 data, so this phase unblocks only after Phase 6.
 
-- [ ] Citation chips/links on assistant messages (company, filing type, date, page/section) — `message-bubble.tsx` currently renders text parts only
+- [ ] Citation chips/links on assistant messages (company, filing type, date, section) — `message-bubble.tsx` currently filters to text parts, so `data-citation` parts arrive and are dropped
 - [ ] Source passage panel — show underlying excerpt for selected citation
 - [x] Empty states (no threads, no corpus match)
 - [x] Error states (auth expired, retrieval failure, grounding failure, network/CORS) — `lib/errors.ts` maps 401/403/404/502 and network failures

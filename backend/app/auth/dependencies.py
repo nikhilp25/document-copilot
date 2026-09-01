@@ -14,7 +14,7 @@ shows up in latency numbers; it belongs behind this same function.
 import uuid
 from dataclasses import dataclass
 from typing import Annotated
-    
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase import AuthError

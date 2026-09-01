@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.auth.dependencies import CurrentUser, get_current_user
 from app.database import chats
+from app.database import citations as citation_rows
 from app.database.models.chat_messages import MessageRole
 from app.main import app
 
@@ -51,6 +52,8 @@ class FakeChats:
         self.threads: dict[uuid.UUID, dict[str, Any]] = {}
         self.owners: dict[uuid.UUID, uuid.UUID] = {}
         self.messages: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        # Keyed by message id, the way `message_citations` hangs off a message.
+        self.citations: dict[uuid.UUID, list[dict[str, Any]]] = {}
         # Records that `ensure_user_record` ran, so the FK prerequisite for
         # thread creation can be asserted rather than assumed.
         self.user_records: list[uuid.UUID] = []
@@ -130,6 +133,14 @@ class FakeChats:
     ) -> None:
         self.threads[thread_id]["title"] = title
 
+    async def insert_citations(
+        self,
+        user: CurrentUser,
+        message_id: uuid.UUID,
+        citations: list[dict[str, Any]],
+    ) -> None:
+        self.citations[message_id] = citations
+
 
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeChats:
@@ -151,6 +162,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeChats:
 
     # Bound by name at import in the route module, so patch it there.
     monkeypatch.setattr("app.api.chat.ensure_user_record", ensure_user_record)
+
+    monkeypatch.setattr(citation_rows, "insert_citations", fake.insert_citations)
 
     return fake
 

@@ -1,10 +1,28 @@
 """The AI SDK stream protocol emitter."""
 
 import json
+import uuid
 
 import pytest
 
-from app.chat.streaming import STREAM_HEADERS, sse, stub_answer, text_stream
+from app.chat.streaming import (
+    STREAM_HEADERS,
+    answer_stream,
+    citation_part,
+    error_part,
+    sse,
+    start_part,
+    status_part,
+)
+
+MESSAGE_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
+
+CHIP = {
+    "chunkId": "66666666-6666-4666-8666-666666666666",
+    "ticker": "NVDA",
+    "section": "Item 1A. Risk Factors",
+    "page": None,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -12,8 +30,18 @@ def _instant_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.chat.streaming._DELTA_DELAY_SECONDS", 0)
 
 
-async def collect(text: str, *, message_id: str = "msg-1") -> list[str]:
-    return [frame async for frame in text_stream(text, message_id=message_id)]
+async def collect(text: str, **kwargs: object) -> list[str]:
+    return [
+        frame async for frame in answer_stream(text, message_id=MESSAGE_ID, **kwargs)
+    ]
+
+
+def parse(frames: list[str]) -> list[dict[str, object]]:
+    return [
+        json.loads(frame.removeprefix("data: "))
+        for frame in frames
+        if not frame.startswith("data: [DONE]")
+    ]
 
 
 def test_sse_frames_are_single_line_and_double_terminated() -> None:
@@ -30,18 +58,44 @@ def test_protocol_version_header_is_declared() -> None:
     assert STREAM_HEADERS["x-vercel-ai-ui-message-stream"] == "v1"
 
 
-@pytest.mark.anyio
-async def test_stream_opens_and_closes_the_message() -> None:
-    frames = await collect("Margins expanded on services mix.")
-    events = [
-        json.loads(frame.removeprefix("data: "))
-        for frame in frames
-        if not frame.startswith("data: [DONE]")
-    ]
+def test_start_announces_the_id_the_message_will_be_stored_under() -> None:
+    assert start_part(MESSAGE_ID) == {"type": "start", "messageId": str(MESSAGE_ID)}
 
-    assert [event["type"] for event in events][:2] == ["start", "text-start"]
-    assert [event["type"] for event in events][-2:] == ["text-end", "finish"]
-    assert frames[-1] == "data: [DONE]\n\n"
+
+def test_status_parts_are_transient() -> None:
+    """Transient parts never enter `message.parts`, so progress leaves no trace."""
+    part = status_part("Searching NVDA…")
+
+    assert part["type"] == "data-status"
+    assert part["transient"] is True
+
+
+def test_citation_parts_are_not_transient_and_carry_a_stable_id() -> None:
+    """Citations have to survive a reload, and re-sending one must not duplicate."""
+    part = citation_part(2, CHIP, quote="Export controls reduced our ability")
+
+    assert part["type"] == "data-citation"
+    assert part["id"] == "citation-2"
+    assert "transient" not in part
+    assert part["data"]["index"] == 2
+    assert part["data"]["ticker"] == "NVDA"
+    assert part["data"]["quote"] == "Export controls reduced our ability"
+
+
+def test_error_parts_carry_the_text_the_analyst_will_read() -> None:
+    # `describeError` on the frontend falls through to this string verbatim.
+    assert error_part("Try a narrower question.") == {
+        "type": "error",
+        "errorText": "Try a narrower question.",
+    }
+
+
+@pytest.mark.anyio
+async def test_stream_opens_and_closes_the_text_part() -> None:
+    kinds = [event["type"] for event in parse(await collect("Margins expanded."))]
+
+    assert kinds[0] == "text-start"
+    assert kinds[-2:] == ["text-end", "finish"]
 
 
 @pytest.mark.anyio
@@ -49,31 +103,29 @@ async def test_deltas_reassemble_into_the_original_text() -> None:
     text = "Services revenue grew 13% year over year, per the FY2024 10-K."
 
     frames = await collect(text)
-    deltas = [
-        json.loads(frame.removeprefix("data: "))
-        for frame in frames
-        if '"text-delta"' in frame
-    ]
+    deltas = [event for event in parse(frames) if event["type"] == "text-delta"]
 
     assert len(deltas) > 1
-    assert "".join(delta["delta"] for delta in deltas) == text
+    assert "".join(str(delta["delta"]) for delta in deltas) == text
+    assert frames[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.anyio
+async def test_citations_follow_the_text_they_support() -> None:
+    """They are only known once the whole answer has been validated."""
+    citation = citation_part(1, CHIP, quote="Export controls")
+
+    kinds = [
+        event["type"]
+        for event in parse(await collect("Sales fell [1].", citations=[citation]))
+    ]
+
+    assert kinds.index("text-end") < kinds.index("data-citation")
+    assert kinds[-1] == "finish"
 
 
 @pytest.mark.anyio
 async def test_empty_text_still_produces_a_complete_message() -> None:
-    frames = await collect("")
+    kinds = [event["type"] for event in parse(await collect(""))]
 
-    types = [
-        json.loads(frame.removeprefix("data: "))["type"]
-        for frame in frames
-        if not frame.startswith("data: [DONE]")
-    ]
-    assert types == ["start", "text-start", "text-end", "finish"]
-
-
-def test_stub_answer_refuses_to_invent_and_echoes_the_question() -> None:
-    answer = stub_answer("What drove Apple's services growth?")
-
-    # The stub must never read like a real grounded answer during development.
-    assert "What drove Apple's services growth?" in answer
-    assert "no filings" in answer
+    assert kinds == ["text-start", "text-end", "finish"]

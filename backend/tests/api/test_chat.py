@@ -6,9 +6,20 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from app.assistant.agent import agent
 from app.auth.dependencies import CurrentUser
-from app.chat import streaming
+from app.chat import orchestrator, streaming
+from tests.assistant.conftest import (
+    QUOTE,
+    FakeRetriever,
+    final,
+    script,
+    search_call,
+)
 from tests.conftest import FakeChats
+
+# What the scripted model "answers" for every streaming test below.
+ANSWER = "Services revenue grew on higher subscription pricing [1]."
 
 
 def question(text: str) -> dict[str, object]:
@@ -156,6 +167,33 @@ def _instant_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(streaming, "_DELTA_DELAY_SECONDS", 0)
 
 
+@pytest.fixture(autouse=True)
+def _scripted_agent(monkeypatch: pytest.MonkeyPatch):
+    """Stand in for OpenAI and the corpus.
+
+    These tests are about what the route decides — who may stream, what gets
+    persisted, in what order. The agent's own behaviour is covered in
+    `tests/assistant`, and reaching a real model here would make the fast suite
+    both slow and non-deterministic.
+    """
+    retriever = FakeRetriever()
+    monkeypatch.setattr(orchestrator, "DocumentRetriever", lambda: retriever)
+    chunk_id = retriever.passages[0].chunk_id
+
+    model = script(
+        lambda info: search_call(query="services growth", ticker="AAPL"),
+        lambda info: final(
+            info,
+            answer=ANSWER,
+            has_evidence=True,
+            citations=[{"index": 1, "chunk_id": str(chunk_id), "quote": QUOTE}],
+        ),
+    )
+
+    with agent.override(model=model):
+        yield retriever
+
+
 def test_stream_emits_a_well_formed_ui_message(
     signed_in: TestClient, store: FakeChats, user: CurrentUser
 ) -> None:
@@ -177,13 +215,18 @@ def test_stream_emits_a_well_formed_ui_message(
     events = stream_events(response.text)
     types = [event["type"] for event in events]
     assert types[0] == "start"
-    assert types[1] == "text-start"
-    assert types[-2:] == ["text-end", "finish"]
+    # Progress first, so the analyst sees the search before the answer.
+    assert types[1] == "data-status"
+    assert types[-2:] == ["data-citation", "finish"]
     assert types.count("text-delta") > 1
 
-    # Every text event belongs to the message the stream announced.
+    # Every text event belongs to the message the stream announced. Citation
+    # parts carry their own ids, which is what makes one replaceable in place.
     message_id = events[0]["messageId"]
-    assert {event["id"] for event in events if "id" in event} == {message_id}
+    text_ids = {
+        event["id"] for event in events if str(event["type"]).startswith("text-")
+    }
+    assert text_ids == {message_id}
 
 
 def test_stream_deltas_reassemble_into_the_persisted_answer(
@@ -233,7 +276,34 @@ def test_turn_persists_both_messages_in_order(
     assert stored[0]["parts"] == [
         {"type": "text", "text": "What drove Apple's services growth?"}
     ]
-    assert stored[1]["parts"] == [{"type": "text", "text": stored[1]["content"]}]
+    # Text first, then the citation parts the live stream sent, so a reloaded
+    # thread renders exactly what the analyst saw.
+    assert stored[1]["parts"][0] == {"type": "text", "text": stored[1]["content"]}
+    assert [part["type"] for part in stored[1]["parts"][1:]] == ["data-citation"]
+
+
+def test_a_turn_persists_the_evidence_behind_its_answer(
+    signed_in: TestClient, store: FakeChats, user: CurrentUser
+) -> None:
+    thread = store.add_thread(user.id)
+    thread_id = uuid.UUID(thread["id"])
+
+    signed_in.post(
+        "/chat/stream",
+        json={
+            "threadId": thread["id"],
+            "messages": [question("What drove Apple's services growth?")],
+        },
+    )
+
+    assistant = store.messages[thread_id][-1]
+    citations = store.citations[uuid.UUID(assistant["id"])]
+
+    assert [citation["citation_index"] for citation in citations] == [1]
+    assert citations[0]["excerpt"] == QUOTE
+    # SEC HTML has no page breaks, so a citation is located by its Item section.
+    assert citations[0]["page"] is None
+    assert citations[0]["section"] == "Item 1A. Risk Factors"
 
 
 def test_first_turn_names_the_thread(
