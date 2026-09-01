@@ -6,13 +6,13 @@
  * them, which is also what makes a reload show the full transcript.
  */
 
-import type { UIMessage } from 'ai'
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { ChatPanel } from '@/components/chat/chat-panel'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { getThread, toUIMessages } from '@/lib/api'
+import type { ChatMessage } from '@/lib/citations'
 import { describeError, signOutIfExpired } from '@/lib/errors'
 import { useChatOutletContext } from '@/pages/chat/outlet-context'
 
@@ -24,7 +24,7 @@ import { useChatOutletContext } from '@/pages/chat/outlet-context'
  * and the page reads as loading again.
  */
 type LoadResult =
-  | { threadId: string; status: 'loaded'; messages: UIMessage[] }
+  | { threadId: string; status: 'loaded'; messages: ChatMessage[] }
   | { threadId: string; status: 'failed'; error: string }
 
 export function ChatThreadPage() {

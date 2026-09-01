@@ -9,8 +9,9 @@
  * expose. It shares the token resolver so there is still only one of those.
  */
 
-import { DefaultChatTransport, type UIMessage } from 'ai'
+import { DefaultChatTransport } from 'ai'
 
+import type { ChatMessage } from '@/lib/citations'
 import { env } from '@/lib/env'
 import { HttpClient } from '@/lib/http'
 import { supabase } from '@/lib/supabase'
@@ -47,8 +48,33 @@ export interface StoredMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
-  parts: UIMessage['parts'] | null
+  parts: ChatMessage['parts'] | null
   createdAt: string
+}
+
+/**
+ * A cited chunk with the filing text around it.
+ *
+ * The citation part already carries the quote, so this is only what the panel
+ * cannot get from the transcript: the chunk in full, and its neighbours. They
+ * arrive as text rather than as passages because the analyst reads them as
+ * context, not as things to click.
+ */
+export interface Passage {
+  chunkId: string
+  documentId: string
+  ticker: string
+  companyName: string | null
+  formType: string
+  fiscalYear: number
+  filingDate: string
+  accessionNumber: string
+  sourceUrl: string
+  section: string | null
+  page: number | null
+  content: string
+  contextBefore: string | null
+  contextAfter: string | null
 }
 
 export interface ThreadDetail {
@@ -70,13 +96,19 @@ export function getThread(threadId: string, signal?: AbortSignal): Promise<Threa
   return api.get<ThreadDetail>(`/chat/threads/${threadId}`, { signal })
 }
 
+export function getPassage(chunkId: string, signal?: AbortSignal): Promise<Passage> {
+  // 404 when the corpus has been re-ingested since the answer was written: the
+  // quote is still true, but the chunk it came from has a new id.
+  return api.get<Passage>(`/passages/${chunkId}`, { signal })
+}
+
 /**
  * Persisted messages in the shape `useChat` initializes from.
  *
  * `parts` is null only for messages the backend built without a wire form; the
  * flattened `content` is a faithful stand-in for those.
  */
-export function toUIMessages(messages: StoredMessage[]): UIMessage[] {
+export function toUIMessages(messages: StoredMessage[]): ChatMessage[] {
   return messages.map((message) => ({
     id: message.id,
     role: message.role,
@@ -91,8 +123,8 @@ export function toUIMessages(messages: StoredMessage[]): UIMessage[] {
  * access token roughly hourly, and a token captured when the page loaded is a
  * 401 on a chat left open over lunch.
  */
-export function chatTransport(threadId: string): DefaultChatTransport<UIMessage> {
-  return new DefaultChatTransport<UIMessage>({
+export function chatTransport(threadId: string): DefaultChatTransport<ChatMessage> {
+  return new DefaultChatTransport<ChatMessage>({
     api: `${env.apiBaseUrl}/chat/stream`,
     headers: async (): Promise<Record<string, string>> => {
       const token = await accessToken()

@@ -12,9 +12,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
-from pydantic.alias_generators import to_camel
 
+from app.api.wire import WireModel
 from app.auth.dependencies import CurrentUser, CurrentUserDep
 from app.chat import messages as ui
 from app.chat import orchestrator
@@ -24,16 +23,6 @@ from app.database.models.chat_messages import MessageRole
 from app.database.users import ensure_user_record
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-
-class WireModel(BaseModel):
-    """camelCase on the wire, snake_case in Python.
-
-    The TypeScript client and the AI SDK both expect camelCase; translating
-    once here beats every frontend call site spelling `created_at`.
-    """
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class ThreadResponse(WireModel):
