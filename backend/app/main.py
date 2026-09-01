@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
+from app.api.passages import router as passages_router
 from app.config import settings
 from app.database.supabase import close_http_client
 
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+app.include_router(passages_router)
 
 
 # %%
